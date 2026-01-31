@@ -21,12 +21,76 @@ type PeriodGoal = { start_date: string; end_date: string; target_weight: number 
 
 const USERS: ActiveUser[] = ["じぃじ", "ばぁば"]
 
-function toUserKey(user: ActiveUser): UserKey {
-  return user === "じぃじ" ? "jiiji" : "baaba"
+function isUuidLike(id: string) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 }
 
-function toActiveUser(userKey: UserKey): ActiveUser {
-  return userKey === "jiiji" ? "じぃじ" : "ばぁば"
+function isMissingUserColumnError(err: unknown) {
+  const msg = String((err as { message?: unknown } | null | undefined)?.message ?? "")
+  // PostgREST の典型: "Could not find the 'user' column of 'quests' in the schema cache"
+  if (msg.includes("'user' column") && msg.includes("schema cache")) return true
+  // Postgres の典型: column "user" does not exist
+  if (msg.includes("column") && msg.includes('"user"') && msg.includes("does not exist")) return true
+  if (msg.includes("column") && msg.includes("user") && msg.includes("does not exist")) return true
+  return false
+}
+
+function supabaseErrorInfo(err: unknown) {
+  const e = err as
+    | {
+        name?: unknown
+        message?: unknown
+        details?: unknown
+        hint?: unknown
+        code?: unknown
+        status?: unknown
+        statusCode?: unknown
+        statusText?: unknown
+        cause?: unknown
+      }
+    | null
+    | undefined
+
+  return {
+    name: typeof e?.name === "string" ? e.name : undefined,
+    message: typeof e?.message === "string" ? e.message : String(e?.message ?? ""),
+    details: e?.details,
+    hint: e?.hint,
+    code: e?.code,
+    status: e?.status ?? e?.statusCode,
+    statusText: e?.statusText,
+    cause: e?.cause,
+  }
+}
+
+function logSupabaseError(context: string, err: unknown) {
+  if (!err) return
+  // ユーザー要望: まず「Supabase Error: <error>」形式で出す
+  console.error("Supabase Error:", err)
+  // Next.jsのconsole表示で {} になっても、message等は別で必ず見えるようにする
+  console.error("Supabase Error Detail:", { context, ...supabaseErrorInfo(err) })
+
+  // #region agent log (debug)
+  fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+    method: "POST",
+    body: JSON.stringify({
+      sessionId: "debug-session",
+      runId: "pre-fix",
+      hypothesisId: "A",
+      location: "app/page.tsx:logSupabaseError",
+      message: "Supabase error surfaced",
+      data: { context, ...supabaseErrorInfo(err) },
+      timestamp: Date.now(),
+    }),
+    // ブラウザCORS preflight回避のため no-cors
+    mode: "no-cors",
+    keepalive: true,
+  }).catch(() => {})
+  // #endregion
+}
+
+function toUserKey(user: ActiveUser): UserKey {
+  return user === "じぃじ" ? "jiiji" : "baaba"
 }
 
 function makeId(prefix: string) {
@@ -106,9 +170,57 @@ const initialWishes: WishItem[] = [
 
 export default function WeightManagementApp() {
   const [activeTab, setActiveTab] = useState<Tab>("home")
-  const [activeUser, setActiveUser] = useState<ActiveUser>("じぃじ")
+  const [activeUser, setActiveUser] = useState<ActiveUser>(() => {
+    if (typeof window === "undefined") return "じぃじ"
+    try {
+      const raw = window.localStorage.getItem("jijibaba-taijyu.activeUser")
+      return raw === "じぃじ" || raw === "ばぁば" ? raw : "じぃじ"
+    } catch {
+      return "じぃじ"
+    }
+  })
   const activeUserKey: UserKey = toUserKey(activeUser)
   const aliveRef = useRef(true)
+
+  useEffect(() => {
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "A",
+        location: "app/page.tsx:WeightManagementApp mount",
+        message: "Env snapshot",
+        data: {
+          // 秘密情報は出さない（URLはホストだけ）
+          supabaseUrlHost:
+            typeof process.env.NEXT_PUBLIC_SUPABASE_URL === "string"
+              ? (() => {
+                  try {
+                    return new URL(process.env.NEXT_PUBLIC_SUPABASE_URL).host
+                  } catch {
+                    return "invalid-url"
+                  }
+                })()
+              : "missing",
+          hasAnonKey: typeof process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY === "string",
+        },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+  }, [])
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("jijibaba-taijyu.activeUser", activeUser)
+    } catch {
+      // ignore
+    }
+  }, [activeUser])
 
   useEffect(() => {
     aliveRef.current = true
@@ -166,6 +278,207 @@ export default function WeightManagementApp() {
     [weightHistory]
   )
 
+  const refreshQuests = useCallback(async (user: ActiveUser) => {
+    const supabase = getSupabaseClient()
+    if (!supabase) return
+
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "B",
+        location: "app/page.tsx:refreshQuests(entry)",
+        message: "refreshQuests called",
+        data: { user },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+
+    // まず user で絞る（user列が無ければ自動フォールバック）
+    const withUser = await supabase
+      .from("quests")
+      .select("id, title, description, points, icon, created_at")
+      .eq("user", user)
+      .order("created_at", { ascending: false })
+
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "B",
+        location: "app/page.tsx:refreshQuests(withUser result)",
+        message: "withUser result",
+        data: {
+          hasError: Boolean(withUser.error),
+          error: withUser.error ? supabaseErrorInfo(withUser.error) : null,
+          rowCount: Array.isArray(withUser.data) ? withUser.data.length : null,
+        },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+
+    const res =
+      withUser.error && isMissingUserColumnError(withUser.error)
+        ? await supabase
+            .from("quests")
+            .select("id, title, description, points, icon, created_at")
+            .order("created_at", { ascending: false })
+        : withUser
+
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "C",
+        location: "app/page.tsx:refreshQuests(resolved result)",
+        message: "resolved result (after fallback if any)",
+        data: {
+          usedFallback: Boolean(withUser.error && isMissingUserColumnError(withUser.error)),
+          hasError: Boolean(res.error),
+          error: res.error ? supabaseErrorInfo(res.error) : null,
+          rowCount: Array.isArray(res.data) ? res.data.length : null,
+        },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+
+    // user 列が無い場合のエラーは「フォールバック前提」なのでノイズとして出さない
+    if (withUser.error && !isMissingUserColumnError(withUser.error)) logSupabaseError("refreshQuests(with user filter)", withUser.error)
+    if (res.error) logSupabaseError("refreshQuests", res.error)
+    if (!aliveRef.current || res.error || !Array.isArray(res.data)) return
+
+    const next: QuestDefinition[] = res.data.flatMap((r) => {
+      const id = String(r.id ?? "")
+      const title = typeof r.title === "string" ? r.title : ""
+      const description = typeof r.description === "string" ? r.description : ""
+      const points = Number(r.points)
+      const icon = normalizeQuestIcon(r.icon)
+      if (!id || !title || !Number.isFinite(points)) return []
+      return [{ id, title, description, points, icon }]
+    })
+    setQuestDefinitions(next)
+  }, [])
+
+  const refreshRewards = useCallback(async (user: ActiveUser) => {
+    const supabase = getSupabaseClient()
+    if (!supabase) return
+
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "D",
+        location: "app/page.tsx:refreshRewards(entry)",
+        message: "refreshRewards called",
+        data: { user },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+
+    const withUser = await supabase
+      .from("rewards")
+      .select("id, title, cost, icon, created_at")
+      .eq("user", user)
+      .order("created_at", { ascending: false })
+
+    const res =
+      withUser.error && isMissingUserColumnError(withUser.error)
+        ? await supabase
+            .from("rewards")
+            .select("id, title, cost, icon, created_at")
+            .order("created_at", { ascending: false })
+        : withUser
+
+    if (withUser.error && !isMissingUserColumnError(withUser.error)) logSupabaseError("refreshRewards(with user filter)", withUser.error)
+    if (res.error) logSupabaseError("refreshRewards", res.error)
+    // #region agent log (debug)
+    fetch("http://127.0.0.1:7243/ingest/6a43e64c-5eb7-4987-8391-369e0be682d9", {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: "debug-session",
+        runId: "pre-fix",
+        hypothesisId: "D",
+        location: "app/page.tsx:refreshRewards(resolved result)",
+        message: "resolved result (after fallback if any)",
+        data: {
+          usedFallback: Boolean(withUser.error && isMissingUserColumnError(withUser.error)),
+          hasError: Boolean(res.error),
+          error: res.error ? supabaseErrorInfo(res.error) : null,
+          rowCount: Array.isArray(res.data) ? res.data.length : null,
+        },
+        timestamp: Date.now(),
+      }),
+      mode: "no-cors",
+      keepalive: true,
+    }).catch(() => {})
+    // #endregion
+    if (!aliveRef.current || res.error || !Array.isArray(res.data)) return
+
+    const next: RewardDefinition[] = res.data.flatMap((r) => {
+      const id = String(r.id ?? "")
+      const title = typeof r.title === "string" ? r.title : ""
+      const cost = Number(r.cost)
+      const icon = normalizeRewardIcon(r.icon)
+      if (!id || !title || !Number.isFinite(cost)) return []
+      return [{ id, title, cost, icon }]
+    })
+    setRewardDefinitions(next)
+  }, [])
+
+  const refreshWishes = useCallback(async (user: ActiveUser) => {
+    const supabase = getSupabaseClient()
+    if (!supabase) return
+
+    const withUser = await supabase
+      .from("wishes")
+      .select("id, icon, title, completed, created_at")
+      .eq("user", user)
+      .order("created_at", { ascending: false })
+
+    const res =
+      withUser.error && isMissingUserColumnError(withUser.error)
+        ? await supabase
+            .from("wishes")
+            .select("id, icon, title, completed, created_at")
+            .order("created_at", { ascending: false })
+        : withUser
+
+    if (withUser.error && !isMissingUserColumnError(withUser.error)) logSupabaseError("refreshWishes(with user filter)", withUser.error)
+    if (res.error) logSupabaseError("refreshWishes", res.error)
+    if (!aliveRef.current || res.error || !Array.isArray(res.data)) return
+
+    const wishItems: WishItem[] = res.data.flatMap((r) => {
+      const id = String(r.id ?? "")
+      const title = typeof r.title === "string" ? r.title : ""
+      const icon = typeof r.icon === "string" && r.icon.length > 0 ? r.icon : "⭐"
+      const completed = Boolean(r.completed ?? false)
+      const createdAt = typeof r.created_at === "string" ? r.created_at : undefined
+      if (!id || !title) return []
+      return [{ id, icon, title, completed, createdAt }]
+    })
+    setWishes(wishItems)
+  }, [])
+
   const refreshPointsFromProfiles = useCallback(async () => {
     const supabase = getSupabaseClient()
     if (!supabase) return
@@ -173,9 +486,11 @@ export default function WeightManagementApp() {
     // 初回起動時に profiles が無い/空でも動くように最低限 upsert（行の確保）
     // goal_weight / points など既存データは上書きしない
     // 注意: points を含めると既存データを 0 に上書きしてしまうため、user のみ upsert する
-    await supabase.from("profiles").upsert([{ user: "じぃじ" }, { user: "ばぁば" }], { onConflict: "user" })
+    const up = await supabase.from("profiles").upsert([{ user: "じぃじ" }, { user: "ばぁば" }], { onConflict: "user" })
+    if (up.error) console.error("Supabase Error:", up.error)
 
     const res = await supabase.from("profiles").select("user, points").in("user", USERS)
+    if (res.error) console.error("Supabase Error:", res.error)
     if (!aliveRef.current || res.error || !Array.isArray(res.data)) return
 
     const map = new Map<ActiveUser, number>()
@@ -211,16 +526,18 @@ export default function WeightManagementApp() {
       }
 
       // 外部キー（period_goals.user -> profiles.user）のため、まず profiles 行を確保
-      await supabase.from("profiles").upsert({ user }, { onConflict: "user" })
+      const ensure = await supabase.from("profiles").upsert({ user }, { onConflict: "user" })
+      if (ensure.error) console.error("Supabase Error:", ensure.error)
 
       if (payload.final_goal_weight !== undefined) {
-        await supabase
+        const r = await supabase
           .from("profiles")
           .upsert({ user, final_goal_weight: payload.final_goal_weight }, { onConflict: "user" })
+        if (r.error) console.error("Supabase Error:", r.error)
       }
 
       if (payload.period_goal) {
-        await supabase
+        const r = await supabase
           .from("period_goals")
           .upsert(
             {
@@ -231,6 +548,7 @@ export default function WeightManagementApp() {
             },
             { onConflict: "user,start_date,end_date" }
           )
+        if (r.error) console.error("Supabase Error:", r.error)
       }
 
       // 再取得して完全同期（切替時も含めて一貫性を保つ）
@@ -239,6 +557,7 @@ export default function WeightManagementApp() {
         .select("final_goal_weight")
         .eq("user", user)
         .maybeSingle()
+      if (profileRes.error) console.error("Supabase Error:", profileRes.error)
       if (!profileRes.error && aliveRef.current) {
         const fg = profileRes.data?.final_goal_weight
         const n = fg == null ? null : Number(fg)
@@ -258,6 +577,7 @@ export default function WeightManagementApp() {
           .eq("start_date", payload.period_goal.start_date)
           .eq("end_date", payload.period_goal.end_date)
           .maybeSingle()
+        if (exactRes.error) console.error("Supabase Error:", exactRes.error)
         row = exactRes.error || !exactRes.data ? null : (exactRes.data as unknown as PeriodGoalRow)
       }
 
@@ -271,6 +591,7 @@ export default function WeightManagementApp() {
           .gte("end_date", todayIso)
           .order("end_date", { ascending: true })
           .limit(1)
+        if (pgActiveRes.error) console.error("Supabase Error:", pgActiveRes.error)
 
         row = Array.isArray(pgActiveRes.data) ? (pgActiveRes.data[0] as unknown as PeriodGoalRow) : null
       }
@@ -297,14 +618,17 @@ export default function WeightManagementApp() {
 
     // まず行を確保（存在しない場合のため）
     // 注意: points を含めると既存データを 0 に上書きしてしまうため、user のみ upsert する
-    await supabase.from("profiles").upsert({ user }, { onConflict: "user" })
+    const ensure = await supabase.from("profiles").upsert({ user }, { onConflict: "user" })
+    if (ensure.error) console.error("Supabase Error:", ensure.error)
 
     const currentRes = await supabase.from("profiles").select("points").eq("user", user).maybeSingle()
+    if (currentRes.error) console.error("Supabase Error:", currentRes.error)
     const current = Number(currentRes.data?.points ?? 0)
     const safeCurrent = Number.isFinite(current) ? current : 0
     const next = Math.max(0, safeCurrent + delta)
 
-    await supabase.from("profiles").update({ points: next }).eq("user", user)
+    const upd = await supabase.from("profiles").update({ points: next }).eq("user", user)
+    if (upd.error) console.error("Supabase Error:", upd.error)
   }
 
   useEffect(() => {
@@ -333,42 +657,10 @@ export default function WeightManagementApp() {
       // ポイントは「じぃじ/ばぁば」両方分を常に最新化（固定ヘッダー用）
       await refreshPointsFromProfiles()
 
-      // quests（共通リスト）
-      const questsRes = await supabase
-        .from("quests")
-        .select("id, title, description, points, icon, created_at")
-        .order("created_at", { ascending: false })
-
-      if (aliveRef.current && !questsRes.error && Array.isArray(questsRes.data)) {
-        const next: QuestDefinition[] = questsRes.data.flatMap((r) => {
-          const id = String(r.id ?? "")
-          const title = typeof r.title === "string" ? r.title : ""
-          const description = typeof r.description === "string" ? r.description : ""
-          const points = Number(r.points)
-          const icon = normalizeQuestIcon(r.icon)
-          if (!id || !title || !Number.isFinite(points)) return []
-          return [{ id, title, description, points, icon }]
-        })
-        setQuestDefinitions(next)
-      }
-
-      // rewards（共通リスト）
-      const rewardsRes = await supabase
-        .from("rewards")
-        .select("id, title, cost, icon, created_at")
-        .order("created_at", { ascending: false })
-
-      if (aliveRef.current && !rewardsRes.error && Array.isArray(rewardsRes.data)) {
-        const next: RewardDefinition[] = rewardsRes.data.flatMap((r) => {
-          const id = String(r.id ?? "")
-          const title = typeof r.title === "string" ? r.title : ""
-          const cost = Number(r.cost)
-          const icon = normalizeRewardIcon(r.icon)
-          if (!id || !title || !Number.isFinite(cost)) return []
-          return [{ id, title, cost, icon }]
-        })
-        setRewardDefinitions(next)
-      }
+      // quests / rewards / wishes（activeUser でフィルタ）
+      await refreshQuests(user)
+      await refreshRewards(user)
+      await refreshWishes(user)
 
       // profiles から final_goal_weight
       const profileRes = await supabase
@@ -376,6 +668,7 @@ export default function WeightManagementApp() {
         .select("final_goal_weight")
         .eq("user", user)
         .maybeSingle()
+      if (profileRes.error) console.error("Supabase Error:", profileRes.error)
 
       if (aliveRef.current && !profileRes.error) {
         const fgRaw = profileRes.data?.final_goal_weight
@@ -393,6 +686,7 @@ export default function WeightManagementApp() {
         .gte("end_date", todayIso)
         .order("end_date", { ascending: true })
         .limit(1)
+      if (pgActiveRes.error) console.error("Supabase Error:", pgActiveRes.error)
 
       // 読み取りエラーで periodGoal を null に戻すと「入力しても反映されない」に見えるため、
       // period_goals の読み取りが成功したときだけ state を更新する。
@@ -407,6 +701,7 @@ export default function WeightManagementApp() {
             .eq("user", user)
             .order("end_date", { ascending: false })
             .limit(1)
+          if (pgLatestRes.error) console.error("Supabase Error:", pgLatestRes.error)
 
           if (pgLatestRes.error) {
             didFetch = false
@@ -435,6 +730,7 @@ export default function WeightManagementApp() {
         .select("weight, recorded_at")
         .eq("user", user)
         .order("recorded_at", { ascending: true })
+      if (weightsRes.error) console.error("Supabase Error:", weightsRes.error)
 
       if (aliveRef.current && !weightsRes.error && Array.isArray(weightsRes.data)) {
         const next: WeightHistoryItem[] = weightsRes.data
@@ -456,6 +752,7 @@ export default function WeightManagementApp() {
         .eq("user", user)
         .order("created_at", { ascending: false })
         .limit(20)
+      if (questHistoryRes.error) console.error("Supabase Error:", questHistoryRes.error)
 
       const questRows = Array.isArray(questHistoryRes.data) ? questHistoryRes.data : []
       const questItems: QuestHistoryItem[] =
@@ -484,6 +781,7 @@ export default function WeightManagementApp() {
         .eq("user", user)
         .order("created_at", { ascending: false })
         .limit(20)
+      if (rewardHistoryRes.error) console.error("Supabase Error:", rewardHistoryRes.error)
 
       const rewardRows = Array.isArray(rewardHistoryRes.data) ? rewardHistoryRes.data : []
       const rewardItems: RewardHistoryItem[] =
@@ -505,28 +803,38 @@ export default function WeightManagementApp() {
         [userKey]: padTo20(rewardItems, (i) => buildDummyRewardHistoryItem(userKey, i, rewardItems.length)),
       }))
 
-      // wishes（やりたいことリスト）
-      const wishesRes = await supabase
-        .from("wishes")
-        .select("id, icon, title, completed, created_at")
-        .order("created_at", { ascending: false })
-
-      if (aliveRef.current && !wishesRes.error && Array.isArray(wishesRes.data)) {
-        const wishItems: WishItem[] = wishesRes.data.flatMap((r) => {
-          const id = String(r.id ?? "")
-          const title = typeof r.title === "string" ? r.title : ""
-          const icon = typeof r.icon === "string" && r.icon.length > 0 ? r.icon : "⭐"
-          const completed = Boolean(r.completed ?? false)
-          const createdAt = typeof r.created_at === "string" ? r.created_at : undefined
-          if (!id || !title) return []
-          return [{ id, icon, title, completed, createdAt }]
-        })
-        setWishes(wishItems)
-      }
     }
 
     void loadLatest()
-  }, [activeUser, refreshPointsFromProfiles])
+  }, [activeUser, refreshPointsFromProfiles, refreshQuests, refreshRewards, refreshWishes])
+
+  const fetchWeightsForRange = useCallback(
+    async (startIso: string, endExclusiveIso: string) => {
+      const supabase = getSupabaseClient()
+      if (!supabase) return []
+
+      const user = activeUser
+      const res = await supabase
+        .from("weights")
+        .select("weight, recorded_at")
+        .eq("user", user)
+        .gte("recorded_at", startIso)
+        .lt("recorded_at", endExclusiveIso)
+        .order("recorded_at", { ascending: true })
+
+      if (res.error || !Array.isArray(res.data)) return []
+
+      return res.data
+        .flatMap((row) => {
+          const iso = normalizeISODate(row.recorded_at)
+          const w = Number(row.weight)
+          if (!iso || !Number.isFinite(w)) return []
+          return [{ isoDate: iso, weight: w }]
+        })
+        .sort((a, b) => a.isoDate.localeCompare(b.isoDate))
+    },
+    [activeUser]
+  )
 
   const handleRecordWeight = async (weight: number, isoDate: string) => {
     const safeIso = isoDate || getLocalISODate(new Date())
@@ -563,11 +871,14 @@ export default function WeightManagementApp() {
       .eq("user", user)
       .eq("recorded_at", safeIso)
       .maybeSingle()
+    if (existingRes.error) console.error("Supabase Error:", existingRes.error)
 
     if (existingRes.data?.id) {
-      await supabase.from("weights").update({ weight }).eq("id", existingRes.data.id)
+      const upd = await supabase.from("weights").update({ weight }).eq("id", existingRes.data.id)
+      if (upd.error) console.error("Supabase Error:", upd.error)
     } else {
-      await supabase.from("weights").insert({ user, weight, recorded_at: safeIso })
+      const ins = await supabase.from("weights").insert({ user, weight, recorded_at: safeIso })
+      if (ins.error) console.error("Supabase Error:", ins.error)
     }
 
     // ポイント（profiles）へ反映
@@ -579,6 +890,7 @@ export default function WeightManagementApp() {
       .select("weight, recorded_at")
       .eq("user", user)
       .order("recorded_at", { ascending: true })
+    if (weightsRes.error) console.error("Supabase Error:", weightsRes.error)
 
     if (!weightsRes.error && Array.isArray(weightsRes.data)) {
       const next: WeightHistoryItem[] = weightsRes.data
@@ -632,7 +944,8 @@ export default function WeightManagementApp() {
     // Supabaseへ永続化（失敗してもUIは維持）
     const supabase = getSupabaseClient()
     if (!supabase) return
-    await supabase.from("quest_history").insert({ user, title: target.title, points: target.points })
+    const ins = await supabase.from("quest_history").insert({ user, title: target.title, points: target.points })
+    if (ins.error) console.error("Supabase Error:", ins.error)
     await applyProfilePointDelta(user, target.points)
   }
 
@@ -659,15 +972,13 @@ export default function WeightManagementApp() {
       // Supabaseへ永続化（activeUser のみ減算）
       const supabase = getSupabaseClient()
       if (!supabase) return
-      await supabase.from("reward_history").insert({ user: activeUser, title: reward.title, cost: reward.cost })
+      const ins = await supabase.from("reward_history").insert({ user: activeUser, title: reward.title, cost: reward.cost })
+      if (ins.error) console.error("Supabase Error:", ins.error)
       await applyProfilePointDelta(activeUser, -reward.cost)
     }
   }
 
   const handleToggleWish = (wishId: string) => {
-    const looksLikeUuid =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(wishId)
-
     let nextCompleted: boolean | null = null
     setWishes((prev) => {
       const next = prev.map((w) => {
@@ -678,12 +989,27 @@ export default function WeightManagementApp() {
       return next
     })
 
-    if (!looksLikeUuid) return
+    if (!isUuidLike(wishId)) return
     void (async () => {
       const supabase = getSupabaseClient()
       if (!supabase) return
       if (nextCompleted == null) return
-      await supabase.from("wishes").update({ completed: nextCompleted }).eq("id", wishId)
+      const user = activeUser
+
+      const withUser = await supabase
+        .from("wishes")
+        .update({ completed: nextCompleted })
+        .eq("id", wishId)
+        .eq("user", user)
+
+      if (withUser.error) console.error("Supabase Error:", withUser.error)
+      if (withUser.error && isMissingUserColumnError(withUser.error)) {
+        const fallback = await supabase.from("wishes").update({ completed: nextCompleted }).eq("id", wishId)
+        if (fallback.error) console.error("Supabase Error:", fallback.error)
+      }
+
+      // 成功直後に再取得して完全同期
+      await refreshWishes(user)
     })()
   }
 
@@ -699,38 +1025,33 @@ export default function WeightManagementApp() {
         return
       }
 
-      const ins = await supabase
+      const user = activeUser
+
+      const insWithUser = await supabase
         .from("wishes")
-        .insert({ icon: safeIcon, title: safeTitle, completed: false })
-        .select("id, icon, title, completed, created_at")
+        .insert({ user, icon: safeIcon, title: safeTitle, completed: false })
+        .select("id")
         .single()
 
+      const ins =
+        insWithUser.error && isMissingUserColumnError(insWithUser.error)
+          ? await supabase.from("wishes").insert({ icon: safeIcon, title: safeTitle, completed: false }).select("id").single()
+          : insWithUser
+
+      if (insWithUser.error) console.error("Supabase Error:", insWithUser.error)
+      if (ins.error) console.error("Supabase Error:", ins.error)
       if (!aliveRef.current) return
 
       if (!ins.error && ins.data) {
-        const row = ins.data as unknown as {
-          id?: unknown
-          icon?: unknown
-          title?: unknown
-          completed?: unknown
-          created_at?: unknown
-        }
-        const id = String(row.id ?? makeId("wish"))
-        const next: WishItem = {
-          id,
-          icon: typeof row.icon === "string" && row.icon.length > 0 ? row.icon : safeIcon,
-          title: typeof row.title === "string" && row.title.length > 0 ? row.title : safeTitle,
-          completed: Boolean(row.completed ?? false),
-          createdAt: typeof row.created_at === "string" ? row.created_at : undefined,
-        }
-        setWishes((prev) => [next, ...prev])
+        // 成功直後に再取得して完全同期（UUID差し替え/並び順も含めてDBが正）
+        await refreshWishes(user)
         return
       }
 
       // 失敗時もUIが止まらないようローカル追加（Supabase未作成/権限不足などを想定）
       setWishes((prev) => [{ id: makeId("wish-local"), icon: safeIcon, title: safeTitle, completed: false }, ...prev])
     },
-    [activeUser]
+    [activeUser, refreshWishes]
   )
 
   const handleCreateQuest = useCallback(
@@ -747,28 +1068,30 @@ export default function WeightManagementApp() {
         return
       }
 
-      const ins = await supabase
+      const user = activeUser
+
+      const insWithUser = await supabase
         .from("quests")
-        .insert({ title, description, points, icon })
-        .select("id, title, description, points, icon")
+        .insert({ user, title, description, points, icon })
+        .select("id")
         .single()
 
+      const ins =
+        insWithUser.error && isMissingUserColumnError(insWithUser.error)
+          ? await supabase.from("quests").insert({ title, description, points, icon }).select("id").single()
+          : insWithUser
+
+      if (insWithUser.error) console.error("Supabase Error:", insWithUser.error)
+      if (ins.error) console.error("Supabase Error:", ins.error)
       if (!aliveRef.current) return
+
       if (!ins.error && ins.data) {
-        const id = String(ins.data.id ?? makeId("quest"))
-        const next: QuestDefinition = {
-          id,
-          title: typeof ins.data.title === "string" ? ins.data.title : title,
-          description: typeof ins.data.description === "string" ? ins.data.description : description,
-          points: Number.isFinite(Number(ins.data.points)) ? Number(ins.data.points) : points,
-          icon: normalizeQuestIcon(ins.data.icon),
-        }
-        setQuestDefinitions((prev) => [next, ...prev])
+        await refreshQuests(user)
       } else {
         setQuestDefinitions((prev) => [{ id: makeId("quest-local"), title, description, points, icon }, ...prev])
       }
     },
-    []
+    [activeUser, refreshQuests]
   )
 
   const handleUpdateQuest = useCallback(
@@ -786,9 +1109,42 @@ export default function WeightManagementApp() {
 
       const supabase = getSupabaseClient()
       if (!supabase) return
-      await supabase.from("quests").update({ title, description, points, icon }).eq("id", questId)
+
+      const user = activeUser
+
+      // UUIDでなければ「既存DB行」ではない可能性が高いので、insert扱いにする
+      if (!isUuidLike(questId)) {
+        const insWithUser = await supabase.from("quests").insert({ user, title, description, points, icon }).select("id").single()
+        const ins =
+          insWithUser.error && isMissingUserColumnError(insWithUser.error)
+            ? await supabase.from("quests").insert({ title, description, points, icon }).select("id").single()
+            : insWithUser
+
+        if (insWithUser.error) console.error("Supabase Error:", insWithUser.error)
+        if (ins.error) console.error("Supabase Error:", ins.error)
+        if (!ins.error) {
+          await refreshQuests(user)
+        }
+        return
+      }
+
+      const updWithUser = await supabase
+        .from("quests")
+        .update({ title, description, points, icon })
+        .eq("id", questId)
+        .eq("user", user)
+        .select("id")
+        .maybeSingle()
+
+      if (updWithUser.error) console.error("Supabase Error:", updWithUser.error)
+      if (updWithUser.error && isMissingUserColumnError(updWithUser.error)) {
+        const fallback = await supabase.from("quests").update({ title, description, points, icon }).eq("id", questId)
+        if (fallback.error) console.error("Supabase Error:", fallback.error)
+      }
+
+      await refreshQuests(user)
     },
-    []
+    [activeUser, refreshQuests]
   )
 
   const handleDeleteQuest = useCallback(async (questId: string) => {
@@ -801,8 +1157,19 @@ export default function WeightManagementApp() {
 
     const supabase = getSupabaseClient()
     if (!supabase) return
-    await supabase.from("quests").delete().eq("id", questId)
-  }, [])
+
+    const user = activeUser
+    if (isUuidLike(questId)) {
+      const delWithUser = await supabase.from("quests").delete().eq("id", questId).eq("user", user)
+      if (delWithUser.error) console.error("Supabase Error:", delWithUser.error)
+      if (delWithUser.error && isMissingUserColumnError(delWithUser.error)) {
+        const fallback = await supabase.from("quests").delete().eq("id", questId)
+        if (fallback.error) console.error("Supabase Error:", fallback.error)
+      }
+    }
+
+    await refreshQuests(user)
+  }, [activeUser, refreshQuests])
 
   const handleCreateReward = useCallback(
     async (payload: { title: string; cost: number; icon: RewardIcon }) => {
@@ -817,27 +1184,32 @@ export default function WeightManagementApp() {
         return
       }
 
-      const ins = await supabase
+      const user = activeUser
+
+      const insWithUser = await supabase
         .from("rewards")
-        .insert({ title, cost, icon })
-        .select("id, title, cost, icon")
+        .insert({ user, title, cost, icon })
+        .select("id")
         .single()
 
+      const ins =
+        insWithUser.error && isMissingUserColumnError(insWithUser.error)
+          ? await supabase.from("rewards").insert({ title, cost, icon }).select("id").single()
+          : insWithUser
+
+      // user列が無い場合はフォールバック前提なのでエラーとしては扱わない
+      if (insWithUser.error && !isMissingUserColumnError(insWithUser.error)) {
+        logSupabaseError("handleCreateReward(insert with user)", insWithUser.error)
+      }
+      if (ins.error) logSupabaseError("handleCreateReward", ins.error)
       if (!aliveRef.current) return
       if (!ins.error && ins.data) {
-        const id = String(ins.data.id ?? makeId("reward"))
-        const next: RewardDefinition = {
-          id,
-          title: typeof ins.data.title === "string" ? ins.data.title : title,
-          cost: Number.isFinite(Number(ins.data.cost)) ? Number(ins.data.cost) : cost,
-          icon: normalizeRewardIcon(ins.data.icon),
-        }
-        setRewardDefinitions((prev) => [next, ...prev])
+        await refreshRewards(user)
       } else {
         setRewardDefinitions((prev) => [{ id: makeId("reward-local"), title, cost, icon }, ...prev])
       }
     },
-    []
+    [activeUser, refreshRewards]
   )
 
   const handleUpdateReward = useCallback(
@@ -852,9 +1224,44 @@ export default function WeightManagementApp() {
 
       const supabase = getSupabaseClient()
       if (!supabase) return
-      await supabase.from("rewards").update({ title, cost, icon }).eq("id", rewardId)
+
+      const user = activeUser
+
+      if (!isUuidLike(rewardId)) {
+        const insWithUser = await supabase.from("rewards").insert({ user, title, cost, icon }).select("id").single()
+        const ins =
+          insWithUser.error && isMissingUserColumnError(insWithUser.error)
+            ? await supabase.from("rewards").insert({ title, cost, icon }).select("id").single()
+            : insWithUser
+        if (insWithUser.error && !isMissingUserColumnError(insWithUser.error)) {
+          logSupabaseError("handleUpdateReward(insert with user; non-uuid id)", insWithUser.error)
+        }
+        if (ins.error) logSupabaseError("handleUpdateReward(insert; non-uuid id)", ins.error)
+        if (!ins.error) {
+          await refreshRewards(user)
+        }
+        return
+      }
+
+      const updWithUser = await supabase
+        .from("rewards")
+        .update({ title, cost, icon })
+        .eq("id", rewardId)
+        .eq("user", user)
+        .select("id")
+        .maybeSingle()
+
+      // user列が無い場合はフォールバックへ（このエラー自体は想定内なのでconsole.errorには出さない）
+      if (updWithUser.error && isMissingUserColumnError(updWithUser.error)) {
+        const fallback = await supabase.from("rewards").update({ title, cost, icon }).eq("id", rewardId)
+        if (fallback.error) logSupabaseError("handleUpdateReward(update fallback)", fallback.error)
+      } else if (updWithUser.error) {
+        logSupabaseError("handleUpdateReward(update with user)", updWithUser.error)
+      }
+
+      await refreshRewards(user)
     },
-    []
+    [activeUser, refreshRewards]
   )
 
   const handleDeleteReward = useCallback(async (rewardId: string) => {
@@ -863,8 +1270,20 @@ export default function WeightManagementApp() {
 
     const supabase = getSupabaseClient()
     if (!supabase) return
-    await supabase.from("rewards").delete().eq("id", rewardId)
-  }, [])
+
+    const user = activeUser
+    if (isUuidLike(rewardId)) {
+      const delWithUser = await supabase.from("rewards").delete().eq("id", rewardId).eq("user", user)
+      if (delWithUser.error && isMissingUserColumnError(delWithUser.error)) {
+        const fallback = await supabase.from("rewards").delete().eq("id", rewardId)
+        if (fallback.error) logSupabaseError("handleDeleteReward(delete fallback)", fallback.error)
+      } else if (delWithUser.error) {
+        logSupabaseError("handleDeleteReward(delete with user)", delWithUser.error)
+      }
+    }
+
+    await refreshRewards(user)
+  }, [activeUser, refreshRewards])
 
   const handleUpdateWish = useCallback(async (wishId: string, payload: { icon: string; title: string }) => {
     const title = payload.title.trim()
@@ -876,8 +1295,31 @@ export default function WeightManagementApp() {
 
     const supabase = getSupabaseClient()
     if (!supabase) return
-    await supabase.from("wishes").update({ title, icon }).eq("id", wishId)
-  }, [])
+
+    const user = activeUser
+    if (!isUuidLike(wishId)) {
+      const insWithUser = await supabase.from("wishes").insert({ user, title, icon, completed: false }).select("id").single()
+      const ins =
+        insWithUser.error && isMissingUserColumnError(insWithUser.error)
+          ? await supabase.from("wishes").insert({ title, icon, completed: false }).select("id").single()
+          : insWithUser
+      if (insWithUser.error) console.error("Supabase Error:", insWithUser.error)
+      if (ins.error) console.error("Supabase Error:", ins.error)
+      if (!ins.error) {
+        await refreshWishes(user)
+      }
+      return
+    }
+
+    const updWithUser = await supabase.from("wishes").update({ title, icon }).eq("id", wishId).eq("user", user)
+    if (updWithUser.error) console.error("Supabase Error:", updWithUser.error)
+    if (updWithUser.error && isMissingUserColumnError(updWithUser.error)) {
+      const fallback = await supabase.from("wishes").update({ title, icon }).eq("id", wishId)
+      if (fallback.error) console.error("Supabase Error:", fallback.error)
+    }
+
+    await refreshWishes(user)
+  }, [activeUser, refreshWishes])
 
   const handleDeleteWish = useCallback(async (wishId: string) => {
     // UIは即時反映
@@ -885,8 +1327,32 @@ export default function WeightManagementApp() {
 
     const supabase = getSupabaseClient()
     if (!supabase) return
-    await supabase.from("wishes").delete().eq("id", wishId)
-  }, [])
+
+    const user = activeUser
+    if (isUuidLike(wishId)) {
+      const delWithUser = await supabase.from("wishes").delete().eq("id", wishId).eq("user", user)
+      if (delWithUser.error) console.error("Supabase Error:", delWithUser.error)
+      if (delWithUser.error && isMissingUserColumnError(delWithUser.error)) {
+        const fallback = await supabase.from("wishes").delete().eq("id", wishId)
+        if (fallback.error) console.error("Supabase Error:", fallback.error)
+      }
+    }
+
+    await refreshWishes(user)
+  }, [activeUser, refreshWishes])
+
+  const handleTabChange = useCallback(
+    (tab: Tab) => {
+      setActiveTab(tab)
+      const supabase = getSupabaseClient()
+      if (!supabase) return
+      const user = activeUser
+      if (tab === "quest") void refreshQuests(user)
+      if (tab === "reward") void refreshRewards(user)
+      if (tab === "dream") void refreshWishes(user)
+    },
+    [activeUser, refreshQuests, refreshRewards, refreshWishes]
+  )
 
   return (
     <div className="min-h-dvh bg-background pb-[calc(80px+env(safe-area-inset-bottom))]">
@@ -969,6 +1435,7 @@ export default function WeightManagementApp() {
             periodGoal={periodGoal}
             weightHistory={weightHistory}
             onRecordWeight={handleRecordWeight}
+            onFetchWeightsForRange={fetchWeightsForRange}
             onSaveGoals={saveGoalsForActiveUser}
           />
         )}
@@ -1012,7 +1479,7 @@ export default function WeightManagementApp() {
       </main>
 
       {/* ボトムナビゲーション */}
-      <BottomNavigation activeTab={activeTab} onTabChange={setActiveTab} />
+      <BottomNavigation activeTab={activeTab} onTabChange={handleTabChange} />
     </div>
   )
 }

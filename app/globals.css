@@ -143,3 +143,92 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* -----------------------------
+   react-calendar（体重カレンダー）
+------------------------------ */
+
+.react-calendar {
+  width: 100%;
+  border: none;
+  background: transparent;
+  font-family: var(--font-sans);
+}
+
+.react-calendar button {
+  font: inherit;
+}
+
+.react-calendar__navigation {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.react-calendar__navigation button {
+  border: 1px solid var(--border);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  border-radius: 14px;
+  padding: 10px 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.react-calendar__navigation button:disabled {
+  opacity: 0.5;
+}
+
+.react-calendar__month-view__weekdays {
+  text-align: center;
+  font-size: 12px;
+  font-weight: 800;
+  color: var(--muted-foreground);
+  margin-bottom: 6px;
+}
+
+.react-calendar__month-view__weekdays abbr {
+  text-decoration: none;
+}
+
+.react-calendar__month-view__days {
+  gap: 6px;
+}
+
+.react-calendar__tile {
+  border-radius: 14px;
+  padding: 10px 6px;
+  background: transparent;
+  color: var(--foreground);
+  border: 1px solid transparent;
+}
+
+.react-calendar__tile:enabled:hover,
+.react-calendar__tile:enabled:focus-visible {
+  background: color-mix(in oklab, var(--primary) 12%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 28%, transparent);
+}
+
+.react-calendar__tile--now {
+  border-color: color-mix(in oklab, var(--accent) 55%, transparent);
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+}
+
+.react-calendar__tile--active {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+}
+
+.react-calendar__tile--neighboringMonth {
+  color: var(--muted-foreground);
+  opacity: 0.7;
+}
+
+.react-calendar__tile.has-weight {
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+}
+
+.react-calendar__tile.has-weight .rc-weight {
+  color: var(--primary);
+}

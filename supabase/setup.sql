@@ -600,7 +600,57 @@ create table if not exists public.wishes (
 );
 
 do $$
+declare
+  relkind "char";
+  legacy_name text;
+  r record;
 begin
+  -- 既存環境で、過去の実行で同名の「index/constraint」が残っていると 42P07 で落ちるため退避します。
+
+  -- (1) public スキーマに同名の「relation」（多くは index）が存在する場合は退避
+  select c.relkind into relkind
+  from pg_class c
+  join pg_namespace n on n.oid = c.relnamespace
+  where n.nspname = 'public'
+    and c.relname = 'jijibaba_wishes_id_pkey'
+  limit 1;
+
+  if relkind is not null then
+    legacy_name :=
+      'jijibaba_wishes_id_pkey_legacy_' ||
+      to_char(clock_timestamp(), 'YYYYMMDDHH24MISS') ||
+      '_' ||
+      floor(random() * 1000000)::int;
+
+    if relkind = 'i' then
+      execute format('alter index public.%I rename to %I', 'jijibaba_wishes_id_pkey', legacy_name);
+    elsif relkind = 'r' then
+      execute format('alter table public.%I rename to %I', 'jijibaba_wishes_id_pkey', legacy_name);
+    else
+      -- ほぼ無いが念のため
+      begin
+        execute format('alter index public.%I rename to %I', 'jijibaba_wishes_id_pkey', legacy_name);
+      exception when others then
+        -- ignore
+      end;
+    end if;
+  end if;
+
+  -- (2) どこかのテーブルに同名 constraint が居る場合も退避（念のため）
+  for r in
+    select conrelid::regclass as tbl
+    from pg_constraint
+    where conname = 'jijibaba_wishes_id_pkey'
+  loop
+    legacy_name :=
+      'jijibaba_wishes_id_pkey_legacy_' ||
+      to_char(clock_timestamp(), 'YYYYMMDDHH24MISS') ||
+      '_' ||
+      floor(random() * 1000000)::int;
+    execute format('alter table %s rename constraint %I to %I', r.tbl, 'jijibaba_wishes_id_pkey', legacy_name);
+  end loop;
+
+  -- wishes のPKが無い場合だけ追加（名前衝突回避のため pkey 名は v2）
   if not exists (
     select 1
     from pg_constraint
@@ -609,7 +659,7 @@ begin
   ) then
     create unique index if not exists jijibaba_wishes_id_pk_idx on public.wishes (id);
     alter table public.wishes
-      add constraint jijibaba_wishes_id_pkey primary key using index jijibaba_wishes_id_pk_idx;
+      add constraint jijibaba_wishes_id_pkey_v2 primary key using index jijibaba_wishes_id_pk_idx;
   end if;
 end $$;
 

@@ -148,11 +148,19 @@ export function QuestView({
           const isCompleted = completedIdsSet.has(quest.id)
           const canComplete = !isCompleted
           return (
-            <button
+            <div
               key={quest.id}
-              type="button"
               onClick={() => {
                 if (!canComplete) return
+                void (async () => {
+                  await onCompleteQuest(quest.id)
+                  await refreshPoints()
+                })()
+              }}
+              onKeyDown={(e) => {
+                if (!canComplete) return
+                if (e.key !== "Enter" && e.key !== " ") return
+                e.preventDefault()
                 void (async () => {
                   await onCompleteQuest(quest.id)
                   await refreshPoints()
@@ -164,6 +172,8 @@ export function QuestView({
                   : "border-border/50 bg-card hover:border-border"
               }`}
               aria-disabled={!canComplete}
+              role="button"
+              tabIndex={0}
             >
               {isCompleted && (
                 <div className="absolute left-2 top-2 flex size-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
@@ -232,7 +242,7 @@ export function QuestView({
                   +{quest.points} pt
                 </div>
               </div>
-            </button>
+            </div>
           )
         })}
       </div>

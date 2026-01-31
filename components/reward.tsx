@@ -131,11 +131,19 @@ export function RewardView({
           const Icon = iconMap[reward.icon]
           const canAfford = points >= reward.cost
           return (
-            <button
+            <div
               key={reward.id}
-              type="button"
               onClick={() => {
                 if (!canAfford) return
+                void (async () => {
+                  await onRedeem(reward.id)
+                  await refreshPoints()
+                })()
+              }}
+              onKeyDown={(e) => {
+                if (!canAfford) return
+                if (e.key !== "Enter" && e.key !== " ") return
+                e.preventDefault()
                 void (async () => {
                   await onRedeem(reward.id)
                   await refreshPoints()
@@ -145,6 +153,8 @@ export function RewardView({
                 canAfford ? "border-border/50 bg-card hover:border-border" : "border-border/30 bg-muted/40"
               }`}
               aria-disabled={!canAfford}
+              role="button"
+              tabIndex={0}
             >
               {/* 編集/削除（控えめ） */}
               <div className="absolute right-2 top-2 flex items-center gap-1">
@@ -205,7 +215,7 @@ export function RewardView({
                   {reward.cost} pt
                 </div>
               </div>
-            </button>
+            </div>
           )
         })}
       </div>

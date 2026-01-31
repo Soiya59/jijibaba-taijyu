@@ -1,14 +1,16 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Card, CardContent } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { WeightChart } from "@/components/weight-chart"
 import { NumpadInput } from "@/components/numpad-input"
-import { Scale, ArrowDown, ArrowUp, Target, Settings2 } from "lucide-react"
+import Calendar from "react-calendar"
+import { Scale, ArrowDown, ArrowUp, Target, Settings2, CalendarDays, LineChart as LineChartIcon } from "lucide-react"
 
 type PeriodGoal = {
   start_date: string
@@ -16,12 +18,15 @@ type PeriodGoal = {
   target_weight: number | null
 }
 
+type MonthWeight = { isoDate: string; weight: number }
+
 interface HomeViewProps {
   currentWeight: number
   finalGoalWeight: number | null
   periodGoal: PeriodGoal | null
   weightHistory: { date: string; weight: number; isoDate?: string }[]
   onRecordWeight: (weight: number, isoDate: string) => void
+  onFetchWeightsForRange?: (startIso: string, endExclusiveIso: string) => Promise<MonthWeight[]>
   onSaveGoals: (payload: {
     final_goal_weight?: number | null
     period_goal?: PeriodGoal
@@ -83,11 +88,65 @@ export function HomeView({
   periodGoal,
   weightHistory,
   onRecordWeight,
+  onFetchWeightsForRange,
   onSaveGoals,
 }: HomeViewProps) {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isGoalModalOpen, setIsGoalModalOpen] = useState(false)
   const [recordIsoDate, setRecordIsoDate] = useState(() => getLocalISODate(new Date()))
+  const [displayMode, setDisplayMode] = useState<"chart" | "calendar">("chart")
+
+  // カレンダー（表示中の月だけ取得）
+  const [calendarActiveStartDate, setCalendarActiveStartDate] = useState(() => {
+    const now = new Date()
+    return new Date(now.getFullYear(), now.getMonth(), 1)
+  })
+  const [calendarWeights, setCalendarWeights] = useState<MonthWeight[]>([])
+  const [calendarLoading, setCalendarLoading] = useState(false)
+  const calendarReqIdRef = useRef(0)
+
+  const calendarWeightByIso = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const row of calendarWeights) m.set(row.isoDate, row.weight)
+    return m
+  }, [calendarWeights])
+
+  const fetchCalendarMonthWeights = useCallback(
+    async (anyDateInMonth: Date) => {
+      const reqId = ++calendarReqIdRef.current
+      const { startIso, endExclusiveIso } = getMonthRangeIso(anyDateInMonth)
+
+      setCalendarLoading(true)
+      try {
+        let rows: MonthWeight[] = []
+        if (onFetchWeightsForRange) {
+          rows = await onFetchWeightsForRange(startIso, endExclusiveIso)
+        } else {
+          // Supabase未設定などのフォールバック（weightHistory から該当月だけ抜く）
+          rows = weightHistory
+            .flatMap((h) => {
+              const iso = h.isoDate
+              const w = Number(h.weight)
+              if (!iso || !Number.isFinite(w)) return []
+              if (iso < startIso || iso >= endExclusiveIso) return []
+              return [{ isoDate: iso, weight: w }]
+            })
+            .sort((a, b) => a.isoDate.localeCompare(b.isoDate))
+        }
+
+        if (calendarReqIdRef.current !== reqId) return
+        setCalendarWeights(rows)
+      } finally {
+        if (calendarReqIdRef.current === reqId) setCalendarLoading(false)
+      }
+    },
+    [onFetchWeightsForRange, weightHistory]
+  )
+
+  useEffect(() => {
+    if (displayMode !== "calendar") return
+    void fetchCalendarMonthWeights(calendarActiveStartDate)
+  }, [displayMode, calendarActiveStartDate, fetchCalendarMonthWeights])
 
   const periodGoalEndLabel = useMemo(() => {
     const endIso = periodGoal?.end_date
@@ -132,8 +191,26 @@ export function HomeView({
   const vsLastWeek = calculateComparison(weightHistory, currentWeight, 7)
   const vsLastMonth = calculateComparison(weightHistory, currentWeight, 30)
 
+  const existingWeightForRecordDate = useMemo(() => {
+    const iso = recordIsoDate
+    if (!iso) return null
+    const hit = weightHistory.find((h) => h.isoDate === iso)?.weight
+    const n = hit == null ? null : Number(hit)
+    return n != null && Number.isFinite(n) ? n : null
+  }, [recordIsoDate, weightHistory])
+
   const handleWeightSubmit = (weight: number) => {
-    onRecordWeight(weight, recordIsoDate || getLocalISODate(new Date()))
+    const iso = recordIsoDate || getLocalISODate(new Date())
+    onRecordWeight(weight, iso)
+
+    // カレンダー表示中は該当月の表示も即時反映（体験優先）
+    if (displayMode === "calendar") {
+      const { startIso, endExclusiveIso } = getMonthRangeIso(calendarActiveStartDate)
+      if (iso >= startIso && iso < endExclusiveIso) {
+        setCalendarWeights((prev) => upsertMonthWeight(prev, iso, weight))
+      }
+    }
+
     setIsModalOpen(false)
   }
 
@@ -289,28 +366,93 @@ export function HomeView({
             />
           </div>
           
-          <h3 className="mb-3 text-center text-lg font-bold text-foreground">体重の推移</h3>
-          <div className="mb-2 flex items-center justify-center gap-6 text-sm">
-            <div className="flex items-center gap-2">
-              <div className="h-1 w-6 rounded" style={{ backgroundColor: "var(--foreground)" }} />
-              <span className="text-muted-foreground">実測値</span>
+          <Tabs value={displayMode} onValueChange={(v) => setDisplayMode(v as "chart" | "calendar")} className="w-full">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-lg font-bold text-foreground">
+                {displayMode === "chart" ? "体重の推移" : "体重カレンダー"}
+              </h3>
+              <TabsList className="h-10">
+                <TabsTrigger value="chart" className="gap-1.5">
+                  <LineChartIcon className="size-4" />
+                  グラフ
+                </TabsTrigger>
+                <TabsTrigger value="calendar" className="gap-1.5">
+                  <CalendarDays className="size-4" />
+                  カレンダー
+                </TabsTrigger>
+              </TabsList>
             </div>
-            <div className="flex items-center gap-2">
-              <div className="h-1 w-6 rounded border-t-2 border-dashed" style={{ borderColor: "var(--destructive)" }} />
-              <span className="text-muted-foreground">最終目標</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="h-1 w-6 rounded" style={{ backgroundColor: "#10b981" }} />
-              <span className="text-muted-foreground">期間目標</span>
-            </div>
-          </div>
-          <div className="h-[300px] w-full min-w-0">
-            <WeightChart
-              data={weightHistory}
-              finalGoalWeight={finalGoalWeight}
-              target_weight={periodGoal?.target_weight ?? null}
-            />
-          </div>
+
+            <TabsContent value="chart" className="mt-3">
+              <div className="mb-2 flex items-center justify-center gap-6 text-sm">
+                <div className="flex items-center gap-2">
+                  <div className="h-1 w-6 rounded" style={{ backgroundColor: "var(--foreground)" }} />
+                  <span className="text-muted-foreground">実測値</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div
+                    className="h-1 w-6 rounded border-t-2 border-dashed"
+                    style={{ borderColor: "var(--destructive)" }}
+                  />
+                  <span className="text-muted-foreground">最終目標</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="h-1 w-6 rounded" style={{ backgroundColor: "#10b981" }} />
+                  <span className="text-muted-foreground">期間目標</span>
+                </div>
+              </div>
+              <div className="h-[300px] w-full min-w-0">
+                <WeightChart
+                  data={weightHistory}
+                  finalGoalWeight={finalGoalWeight}
+                  target_weight={periodGoal?.target_weight ?? null}
+                />
+              </div>
+            </TabsContent>
+
+            <TabsContent value="calendar" className="mt-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs text-muted-foreground">日付をタップすると、その日の体重入力が開きます。</p>
+                {calendarLoading ? <p className="text-xs text-muted-foreground">読み込み中…</p> : null}
+              </div>
+              <div className="rounded-3xl border-2 border-border/50 bg-card p-3">
+                <Calendar
+                  className="react-calendar"
+                  locale="ja-JP"
+                  view="month"
+                  minDetail="month"
+                  maxDetail="month"
+                  prev2Label={null}
+                  next2Label={null}
+                  value={fromISOToLocalDate(recordIsoDate)}
+                  onClickDay={(d) => {
+                    setRecordIsoDate(getLocalISODate(d))
+                    setIsModalOpen(true)
+                  }}
+                  onActiveStartDateChange={({ activeStartDate, view }) => {
+                    if (view !== "month" || !activeStartDate) return
+                    setCalendarActiveStartDate(activeStartDate)
+                  }}
+                  tileClassName={({ date, view }) => {
+                    if (view !== "month") return ""
+                    const iso = getLocalISODate(date)
+                    return calendarWeightByIso.has(iso) ? "has-weight" : ""
+                  }}
+                  tileContent={({ date, view }) => {
+                    if (view !== "month") return null
+                    const iso = getLocalISODate(date)
+                    const w = calendarWeightByIso.get(iso)
+                    if (w == null) return null
+                    return (
+                      <div className="rc-weight mt-1 text-[11px] font-extrabold leading-none">
+                        {w.toFixed(1)}
+                      </div>
+                    )
+                  }}
+                />
+              </div>
+            </TabsContent>
+          </Tabs>
         </CardContent>
       </Card>
 
@@ -335,7 +477,7 @@ export function HomeView({
             />
           </div>
           <NumpadInput
-            initialValue={currentWeight}
+            initialValue={existingWeightForRecordDate ?? currentWeight}
             onSubmit={handleWeightSubmit}
             onCancel={() => setIsModalOpen(false)}
           />
@@ -516,6 +658,26 @@ function ProgressCard({
 function getLocalISODate(d: Date) {
   const tz = d.getTimezoneOffset() * 60_000
   return new Date(d.getTime() - tz).toISOString().slice(0, 10)
+}
+
+function fromISOToLocalDate(iso: string) {
+  // "YYYY-MM-DD" を「ローカル日付」として扱う
+  return new Date(`${iso}T00:00:00`)
+}
+
+function getMonthRangeIso(anyDateInMonth: Date) {
+  const start = new Date(anyDateInMonth.getFullYear(), anyDateInMonth.getMonth(), 1)
+  const end = new Date(anyDateInMonth.getFullYear(), anyDateInMonth.getMonth() + 1, 1)
+  return { startIso: getLocalISODate(start), endExclusiveIso: getLocalISODate(end) }
+}
+
+function upsertMonthWeight(prev: MonthWeight[], isoDate: string, weight: number): MonthWeight[] {
+  const out = [...prev]
+  const idx = out.findIndex((r) => r.isoDate === isoDate)
+  if (idx >= 0) out[idx] = { isoDate, weight }
+  else out.push({ isoDate, weight })
+  out.sort((a, b) => a.isoDate.localeCompare(b.isoDate))
+  return out
 }
 
 function toJapaneseMDFromISO(iso: string) {

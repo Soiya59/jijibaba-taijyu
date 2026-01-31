@@ -98,16 +98,22 @@ export function DreamView({
       <div className="grid grid-cols-3 gap-3">
         {wishes.map((wish) => {
           return (
-            <button
+            <div
               key={wish.id}
-              type="button"
               onClick={() => onToggleWish(wish.id)}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" && e.key !== " ") return
+                e.preventDefault()
+                onToggleWish(wish.id)
+              }}
               aria-pressed={wish.completed}
               className={`group relative rounded-2xl border-2 p-3 text-left transition-all active:scale-[0.98] ${
                 wish.completed
                   ? "border-emerald-200/60 bg-emerald-50/40 dark:border-emerald-800/30 dark:bg-emerald-950/10"
                   : "border-border/50 bg-card hover:border-border"
               }`}
+              role="button"
+              tabIndex={0}
             >
               {wish.completed && (
                 <div className="absolute left-2 top-2 flex size-6 items-center justify-center rounded-full bg-emerald-500 text-white shadow-sm">
@@ -166,7 +172,7 @@ export function DreamView({
                   </p>
                 </div>
               </div>
-            </button>
+            </div>
           )
         })}
       </div>
